@@ -2906,12 +2906,20 @@
       <form class="account-form" action="#" method="post">
         <input type="hidden" name="role" value="user" data-account-role>
         <label>
-          <span>To'liq ism</span>
+          <span>Ism</span>
           <input type="text" name="full_name" autocomplete="name" required>
+        </label>
+        <label>
+          <span>Familiya</span>
+          <input type="text" name="last_name" autocomplete="family-name" required>
         </label>
         <label>
           <span>Elektron pochta</span>
           <input type="email" name="email" autocomplete="email" required>
+        </label>
+        <label>
+          <span>Telefon raqam</span>
+          <input type="tel" name="phone" autocomplete="tel" placeholder="+998 90 123 45 67" required>
         </label>
         <label>
           <span>Parol</span>
@@ -3291,6 +3299,8 @@
       </div>
     </div>
   </footer>
+  <script src="/config.js"></script>
+  <script src="services/api.js"></script>
   <script>
     const accountModal = document.querySelector("[data-account-modal]");
     const accountOpenButtons = document.querySelectorAll("[data-account-open]");
@@ -3413,6 +3423,7 @@
       users: "uzbekistan_users",
       actions: "uzbekistan_actions",
       currentUser: "uzbekistan_current_user",
+      apiToken: "uzbekistan_api_token",
       siteContent: "uzbekistan_site_content",
       customPlaces: "uzbekistan_custom_places",
       language: "uzbekistan_language",
@@ -3973,6 +3984,37 @@
       return readStorage(storageKeys.currentUser, null);
     }
 
+    const api = window.UzbekistanAPI;
+
+    function setSubmitLoading(button, isLoading, loadingText = "Yuklanmoqda...") {
+      if (!button) return;
+      if (isLoading) {
+        button.dataset.originalText = button.textContent;
+        button.textContent = loadingText;
+        button.disabled = true;
+      } else {
+        button.textContent = button.dataset.originalText || button.textContent;
+        button.disabled = false;
+      }
+    }
+
+    function mapApiUser(apiUser, password = "") {
+      return normalizeUserRole({
+        id: apiUser.id,
+        name: `${apiUser.firstName || ""} ${apiUser.lastName || ""}`.trim(),
+        email: apiUser.email,
+        phone: apiUser.phone,
+        password,
+        country: "Kiritilmagan",
+        interests: [],
+        avatar: "",
+        role: String(apiUser.role || "USER").toLowerCase(),
+        isAdmin: ["ADMIN", "OWNER"].includes(apiUser.role),
+        isOwner: apiUser.role === "OWNER",
+        createdAt: apiUser.createdAt || new Date().toISOString()
+      });
+    }
+
     function isAdminUser() {
       const currentUser = getCurrentUser();
       return Boolean(currentUser && currentUser.isAdmin);
@@ -4285,6 +4327,28 @@
         }).join("")
         : "<p>Hali hech kim ro'yxatdan o'tmagan.</p>";
 
+      if (api.getToken()) {
+        adminUsers.innerHTML = "<p>Database foydalanuvchilari yuklanmoqda...</p>";
+        api.getUsers()
+          .then((result) => {
+            adminUsers.innerHTML = result.users.length
+              ? result.users.map((user) => `
+                <article class="admin-user">
+                  <strong>${escapeHtml(`${user.firstName} ${user.lastName}`)}</strong>
+                  <span>${escapeHtml(user.email)}</span>
+                  <p>Telefon: ${escapeHtml(user.phone || "Kiritilmagan")}</p>
+                  <p>Huquq: ${escapeHtml(user.role)}</p>
+                  <p>Yaratildi: ${formatTime(user.createdAt)}</p>
+                  <button class="admin-delete" type="button" data-delete-api-user="${escapeHtml(user.id)}">Database hisobini o'chirish</button>
+                </article>
+              `).join("")
+              : "<p>Database hali bo'sh.</p>";
+          })
+          .catch((error) => {
+            adminUsers.innerHTML = `<p>${escapeHtml(error.message)} Local foydalanuvchilar ko'rsatilmoqda.</p>`;
+          });
+      }
+
       adminActions.innerHTML = actions.length
         ? actions.map((action) => `
           <article>
@@ -4574,6 +4638,7 @@
       }
 
       localStorage.removeItem(storageKeys.currentUser);
+      localStorage.removeItem(storageKeys.apiToken);
       closeProfileModal();
       updateAccountButton();
     });
@@ -4610,15 +4675,34 @@
       }
 
       localStorage.removeItem(storageKeys.currentUser);
+      localStorage.removeItem(storageKeys.apiToken);
       closeAdminAccountModal();
       updateAccountButton();
     });
 
-    loginForm.addEventListener("submit", (event) => {
+    loginForm.addEventListener("submit", async (event) => {
       event.preventDefault();
       const formData = new FormData(loginForm);
       const email = String(formData.get("email") || "").trim().toLowerCase();
       const password = String(formData.get("password") || "");
+      const submitButton = loginForm.querySelector("button[type='submit']");
+      setSubmitLoading(submitButton, true, "Kirilmoqda...");
+
+      try {
+        const result = await api.login({ email, password });
+        const apiUser = mapApiUser(result.user, password);
+        writeStorage(storageKeys.currentUser, apiUser);
+        saveAction("Qayta kirish", `${apiUser.name} database orqali qayta kirdi.`);
+        updateAccountButton();
+        closeLoginModal();
+        openProfileModal();
+        return;
+      } catch (error) {
+        loginStatus.textContent = `${error.message} Local hisob tekshirilmoqda...`;
+      } finally {
+        setSubmitLoading(submitButton, false);
+      }
+
       const users = readStorage(storageKeys.users, []);
       const userIndex = users.findIndex((item) => item.email.toLowerCase() === email);
       const user = userIndex >= 0 ? normalizeUserRole(users[userIndex]) : null;
@@ -4641,6 +4725,7 @@
       users[userIndex] = user;
       writeStorage(storageKeys.users, users);
       writeStorage(storageKeys.currentUser, user);
+      api.clearToken();
       saveAction("Qayta kirish", `${user.name} email va parol orqali qayta kirdi.`);
       updateAccountButton();
       closeLoginModal();
@@ -4707,9 +4792,28 @@
       renderAdminPanel();
     });
 
+    adminUsers.addEventListener("click", async (event) => {
+      const deleteButton = event.target.closest("[data-delete-api-user]");
+      if (!deleteButton || !isAdminUser()) return;
+
+      deleteButton.disabled = true;
+      deleteButton.textContent = "O'chirilmoqda...";
+
+      try {
+        await api.deleteUser(deleteButton.dataset.deleteApiUser);
+        saveAction("Admin o'chirdi", "Database foydalanuvchilaridan biri o'chirildi.");
+        renderAdminPanel();
+      } catch (error) {
+        deleteButton.disabled = false;
+        deleteButton.textContent = error.message;
+      }
+    });
+
     accountForm.addEventListener("submit", async (event) => {
       event.preventDefault();
       const formData = new FormData(accountForm);
+      const submitButton = accountForm.querySelector("button[type='submit']");
+      setSubmitLoading(submitButton, true, "Saqlanmoqda...");
       const role = String(formData.get("role") || "user");
       const currentUser = getCurrentUser();
       const ownerUser = findOwnerUser();
@@ -4717,9 +4821,14 @@
       const isOwner = role === "owner";
       const isAdmin = role === "admin" || isOwner;
       const isOwnerAddingAdmin = role === "admin" && Boolean(currentUser && (currentUser.isOwner || currentUser.role === "owner"));
+      const firstName = String(formData.get("full_name") || "").trim();
+      const lastName = String(formData.get("last_name") || "").trim();
+      const phone = String(formData.get("phone") || "").trim();
+      const password = String(formData.get("password") || "");
 
       if (isOwner && ownerUser) {
         accountStatus.textContent = `Ega hisobi allaqachon ${ownerUser.email} nomiga ochilgan.`;
+        setSubmitLoading(submitButton, false);
         return;
       }
 
@@ -4727,14 +4836,16 @@
         accountStatus.textContent = ownerUser
           ? "Admin qo'shish faqat Ega hisobiga ruxsat."
           : "Avval Ega hisobini yarating, keyin admin qo'sha olasiz.";
+        setSubmitLoading(submitButton, false);
         return;
       }
 
       const user = {
         id: createId(),
-        name: String(formData.get("full_name") || "").trim(),
+        name: `${firstName} ${lastName}`.trim(),
         email: String(formData.get("email") || "").trim(),
-        password: String(formData.get("password") || ""),
+        phone,
+        password,
         country: String(formData.get("country") || "").trim(),
         interests: formData.getAll("interest"),
         avatar: await readImageFile(formData.get("avatar")),
@@ -4743,6 +4854,36 @@
         role,
         createdAt: new Date().toISOString()
       };
+
+      if (role === "user") {
+        try {
+          const result = await api.register({
+            firstName,
+            lastName,
+            email: user.email,
+            phone,
+            password
+          });
+          const apiUser = {
+            ...mapApiUser(result.user, password),
+            country: user.country,
+            interests: user.interests,
+            avatar: user.avatar
+          };
+          writeStorage(storageKeys.apiToken, result.token);
+          writeStorage(storageKeys.currentUser, apiUser);
+          updateAccountButton();
+          saveAction("Hisob yaratildi", `${apiUser.name} database orqali ro'yxatdan o'tdi.`);
+          closeAccountModal();
+          openProfileModal();
+          return;
+        } catch (error) {
+          accountStatus.textContent = `${error.message} Local hisob sifatida saqlanmoqda.`;
+        } finally {
+          setSubmitLoading(submitButton, false);
+        }
+      }
+
       const users = readStorage(storageKeys.users, []);
       const existingIndex = users.findIndex((item) => item.email.toLowerCase() === user.email.toLowerCase());
       const existingUser = existingIndex >= 0 ? normalizeUserRole(users[existingIndex]) : null;
@@ -4753,11 +4894,13 @@
 
       if (existingUser && (existingUser.isAdmin || existingUser.isOwner) && !isAdmin) {
         accountStatus.textContent = "Bu email boshqaruvchi hisobiga tegishli. Oddiy hisob qilib o'zgartirib bo'lmaydi.";
+        setSubmitLoading(submitButton, false);
         return;
       }
 
       if (existingUser && existingUser.isOwner && !isOwner) {
         accountStatus.textContent = "Ega hisobini boshqa turga o'zgartirib bo'lmaydi.";
+        setSubmitLoading(submitButton, false);
         return;
       }
 
@@ -4771,6 +4914,7 @@
       if (!isOwnerAddingAdmin) {
         writeStorage(storageKeys.currentUser, normalizeUserRole(user));
       }
+      api.clearToken();
       updateAccountButton();
       saveAction("Hisob yaratildi", `${user.name} saytga ${getUserRole(user) || "oddiy hisob"} sifatida ro'yxatdan o'tdi.`);
       accountStatus.textContent = isOwnerAddingAdmin ? "Admin hisob qo'shildi." : "Hisob yaratildi.";
@@ -4786,6 +4930,7 @@
         closeAccountModal();
         openProfileModal();
       }
+      setSubmitLoading(submitButton, false);
     });
 
     siteEditor.addEventListener("submit", (event) => {
