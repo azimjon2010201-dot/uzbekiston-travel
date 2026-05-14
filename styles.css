@@ -306,6 +306,12 @@ a {
   transform: translateY(-1px);
 }
 
+.signup[hidden],
+.signup--other[hidden],
+[data-admin-entry-open][hidden] {
+  display: none !important;
+}
+
 .signup svg {
   width: 15px;
   height: 15px;
